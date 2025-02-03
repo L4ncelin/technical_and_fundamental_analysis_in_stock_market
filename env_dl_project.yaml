@@ -26,3 +26,4 @@ dependencies:
     - tensorflow
     - statsmodels
     - shap
+    - bokeh
