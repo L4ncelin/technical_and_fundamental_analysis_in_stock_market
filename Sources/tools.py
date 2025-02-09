@@ -9,10 +9,15 @@ from sklearn.model_selection import train_test_split
 # ------------------------------ Data treatment ------------------------------ #
 def get_technical_df():
     technical_df = pd.read_csv("Data/Nasdaq-100 Technical/NASDAQ_100.csv", sep=",")
-    technical_df = filter_date_df(technical_df)
-    technical_df.drop(columns=["avg_vol_20d", "change_percent", "date"], inplace=True)
+    #technical_df = filter_date_df(technical_df)
+    technical_df.drop(columns=["avg_vol_20d", "change_percent"], inplace=True)
 
     return technical_df
+
+def get_fundamental_df():
+    fundamental_df = pd.read_csv("Data/Nasdaq-100 Fundamental/nasdaq100_metrics_ratios.csv", sep=",")
+
+    return fundamental_df
 
 def compute_indicators(technical_df):
 
@@ -54,7 +59,7 @@ def filter_date_df(df):
     df['date'] = pd.to_datetime(df['date'])
 
     # We keep only from 2017 to 2022 because of the Fundamental dataset
-    filtered_df = df[(df['date'] >= "2015-01-01") & (df['date'] <= "2022-12-31")]
+    filtered_df = df[(df['date'] >= "2017-01-01") & (df['date'] <= "2022-12-31")]
 
     return filtered_df
 
