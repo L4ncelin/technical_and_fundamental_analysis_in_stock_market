@@ -27,3 +27,4 @@ dependencies:
     - statsmodels
     - shap
     - bokeh
+    - pandas-ta

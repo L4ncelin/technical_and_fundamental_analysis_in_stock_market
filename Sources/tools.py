@@ -8,14 +8,16 @@ from sklearn.model_selection import train_test_split
 
 # ------------------------------ Data treatment ------------------------------ #
 def get_technical_df():
-    technical_df = pd.read_csv("Data/Nasdaq-100 Technical/NASDAQ_100.csv", sep=",")
+    technical_df = pd.read_csv("Data/Nasdaq-100 Technical/NASDAQ_100_companies.csv", sep="\t")
     #technical_df = filter_date_df(technical_df)
-    technical_df.drop(columns=["avg_vol_20d", "change_percent"], inplace=True)
+    #technical_df.drop(columns=["avg_vol_20d", "change_percent"], inplace=True)
 
     return technical_df
 
 def get_fundamental_df():
     fundamental_df = pd.read_csv("Data/Nasdaq-100 Fundamental/nasdaq100_metrics_ratios.csv", sep=",")
+
+    fundamental_df.drop(columns=["company", "sector", "subsector", "predictability", "profitability"], inplace=True)
 
     return fundamental_df
 
@@ -63,6 +65,243 @@ def filter_date_df(df):
 
     return filtered_df
 
+def create_windows_dataframe(df):
+    """
+    Pour chaque action (colonne 'Name') et pour chaque année entre 2017 et 2021, 
+    extrait et sauvegarde dans un DataFrame :
+      - 'Name' : le nom de l'action
+      - 'year' : l'année traitée (pour la fenêtre technique)
+      - 'tech_window' : une liste contenant les 30 derniers jours de l'année en cours (colonne 'Close')
+      - 'target_window' : une liste contenant les 3 premiers jours de l'année suivante (colonne 'Close')
+      
+    Seules les années pour lesquelles il existe au moins 30 jours dans l'année courante
+    et au moins 3 jours dans l'année suivante sont retenues.
+    
+    Paramètres :
+      df : DataFrame contenant au moins les colonnes 'date', 'Close', 'Name'
+    
+    Renvoie :
+      windows_df : DataFrame avec les colonnes ['Name', 'year', 'tech_window', 'target_window']
+    """
+    # S'assurer que la colonne 'date' est bien au format datetime
+    df['Date'] = pd.to_datetime(df['Date'])
+    # Trier par nom d'action et par date
+    df = df.sort_values(by=['Name', 'Date']).reset_index(drop=True)
+    
+    windows = []  # liste de dictionnaires pour chaque fenêtre
+    
+    # Parcourir chaque action
+    for name, group in df.groupby('Name'):
+        group = group.copy()
+        group['year'] = group['Date'].dt.year
+        
+        # Pour chaque année de 2017 à 2021
+        for yr in sorted(group['year'].unique()):
+          if yr < 2016:
+            continue
+          else:
+            data_year = group[group['year'] == yr]
+            # Vérifier qu'il y a au moins 30 observations dans l'année
+            if len(data_year) < 30:
+                continue
+            # Fenêtre technique : les 30 derniers jours de l'année (en ordre chronologique)
+            tech_window = data_year.iloc[-30:]['Close'].tolist()
+            
+            # Récupérer les données de l'année suivante pour constituer la cible
+            next_year = yr + 1
+            data_next_year = group[group['year'] == next_year]
+            if len(data_next_year) < 3:
+                continue
+            # Fenêtre cible : les 3 premiers jours de l'année suivante
+            target_window = data_next_year.iloc[:3]['Close'].tolist()
+            
+            # Ajouter la fenêtre à la liste
+            windows.append({
+                'Name': name,
+                'year': yr+1,
+                'tech_window': tech_window,
+                'target_window': target_window
+            })
+    
+    # Conversion de la liste en DataFrame
+    windows_df = pd.DataFrame(windows)
+    return windows_df
+
+
+def filter_actions_complete_years(df):
+    """
+    Filtre le DataFrame pour ne conserver que les actions qui possèdent des fenêtres pour 
+    toutes les années de 2017 à 2021.
+    
+    Paramètres :
+      df : DataFrame contenant au moins les colonnes 'Name' et 'year'
+    
+    Renvoie :
+      filtered_df : DataFrame filtré ne contenant que les actions ayant les années 2017 à 2021 complètes.
+    """
+    required_years = set(range(2017, 2022))  # {2017, 2018, 2019, 2020, 2021}
+    valid_actions = []
+    
+    # Pour chaque action, vérifier si toutes les années requises sont présentes
+    for name, group in df.groupby("Name"):
+        years_present = set(group["year"].unique())
+        if required_years.issubset(years_present):
+            valid_actions.append(name)
+    
+    # Filtrer le DataFrame pour ne garder que les actions valides
+    filtered_df = df[df["Name"].isin(valid_actions)].reset_index(drop=True)
+    return filtered_df
+
+
+def transform_fundamentals(df):
+    """
+    Transforme le DataFrame de fondamentaux de format large en un format long.
+    
+    Le DataFrame d'entrée doit contenir :
+      - Une colonne 'symbol' avec le nom de l'action.
+      - Des colonnes pour chaque indicateur avec un suffixe d'année, par exemple :
+          asset_turnover_2017, asset_turnover_2018, ..., asset_turnover_2022, asset_turnover_latest.
+    
+    La fonction effectue les opérations suivantes :
+      1. Exclut les colonnes se terminant par '_latest'.
+      2. Passe du format large au format long via un melt.
+      3. Extrait, à partir du nom de la colonne, le nom de l'indicateur et l'année.
+      4. Effectue un pivot pour obtenir une ligne par couple (symbol, year) avec une colonne par indicateur.
+    
+    Paramètres :
+      df (DataFrame) : DataFrame initial contenant la colonne 'symbol' et les indicateurs.
+      
+    Retourne :
+      df_transformed (DataFrame) : DataFrame transformé avec les colonnes 'symbol', 'year' et une colonne par indicateur.
+    """
+    # On garde la colonne 'symbol' et toutes les colonnes qui ne se terminent pas par '_latest'
+    id_vars = ['symbol']
+    value_vars = [col for col in df.columns if col not in id_vars and not col.endswith('_latest')]
+    
+    # Transformation en format long
+    df_long = df.melt(id_vars=id_vars, value_vars=value_vars, 
+                      var_name='variable', value_name='value')
+    
+    # Extraire l'année et le nom de l'indicateur à partir du nom de la variable.
+    # On suppose que les colonnes sont de la forme "indicator_year"
+    df_long['year'] = df_long['variable'].apply(lambda x: x.split('_')[-1])
+    df_long['indicator'] = df_long['variable'].apply(lambda x: '_'.join(x.split('_')[:-1]))
+    
+    # Pivot pour obtenir une ligne par (symbol, year) et une colonne par indicateur
+    df_pivot = df_long.pivot_table(index=['symbol', 'year'], 
+                                   columns='indicator', 
+                                   values='value', 
+                                   aggfunc='first').reset_index()
+    
+    # Convertir l'année en entier
+    df_pivot['year'] = df_pivot['year'].astype(int)
+    
+    # Réordonner les colonnes pour avoir 'symbol' et 'year' en premier
+    cols = df_pivot.columns.tolist()
+    cols = ['symbol', 'year'] + [col for col in cols if col not in ['symbol', 'year']]
+    df_transformed = df_pivot[cols]
+    
+    return df_transformed
+
+
+def fill_missing_values(df):
+    """
+    Remplit les valeurs manquantes dans le DataFrame en interpolant linéairement pour chaque action.
+    S'il reste des NaN, applique un forward fill (ffill) puis un backward fill (bfill).
+    
+    Paramètres :
+        df (pd.DataFrame) : DataFrame contenant les colonnes 'symbol', 'year' et les indicateurs financiers.
+
+    Retourne :
+        pd.DataFrame : DataFrame sans NaN.
+    """
+    df_filled = df.copy()
+
+    # Appliquer l'interpolation et les fills sur chaque action individuellement
+    df_filled = df_filled.groupby("symbol").apply(lambda group: group.interpolate(method='linear').ffill().bfill())
+
+    # Réinitialiser l'index pour éviter une multi-indexation
+    df_filled.reset_index(drop=True, inplace=True)
+
+    return df_filled
+
+
+def fill_nan_with_yearly_mean(df):
+    """
+    Remplace les colonnes entièrement remplies de NaN pour une action donnée par la moyenne de cette variable 
+    sur l'année correspondante.
+
+    Paramètres :
+        df (pd.DataFrame) : DataFrame contenant les colonnes 'symbol', 'year' et les indicateurs financiers.
+
+    Retourne :
+        pd.DataFrame : DataFrame où les valeurs entièrement NaN pour une action sont remplacées par la moyenne de l'année correspondante.
+    """
+    # Identifier les colonnes indicateurs (hors 'symbol' et 'year')
+    cols_to_fill = df.columns.difference(['symbol', 'year'])
+
+    # Calculer la moyenne de chaque variable pour chaque année
+    yearly_means = df.groupby("year")[cols_to_fill].mean()
+
+    def fill_action_nan(group):
+        """
+        Pour chaque action, remplace les colonnes entièrement NaN par la moyenne annuelle correspondante.
+        """
+        for col in cols_to_fill:
+            if group[col].isna().all():  # Vérifie si la colonne est entièrement NaN pour cette action
+                group[col] = group['year'].map(yearly_means[col])  # Remplace par la moyenne de l'année correspondante
+        return group
+
+    # Appliquer le remplissage à chaque action
+    df_filled = df.groupby("symbol", group_keys=False).apply(fill_action_nan)
+
+    return df_filled
+
+
+def prepare_model_inputs(df, tech_features, fund_features):
+    """
+    Prépare les entrées et sorties pour le modèle.
+
+    :param df: DataFrame contenant les colonnes 'tech_window', 'target_window' et les features fondamentaux
+    :param tech_features: Nombre de caractéristiques techniques utilisées dans `tech_window`
+    :param fund_features: Liste des noms des variables fondamentales utilisées
+    :return: (X_tech, X_fund, y)
+    """
+    # Convertir tech_window et target_window en numpy array
+    X_tech = np.stack(df['tech_window'].values)  # (nb_samples, 30)
+    y = np.stack(df['target_window'].values)     # (nb_samples, 3)
+
+    # Vérifier si chaque séquence de `tech_window` a bien la forme attendue
+    assert X_tech.shape[1] == 30, f"Erreur : X_tech doit avoir 30 timesteps, mais a {X_tech.shape[1]}"
+    
+    # Reshape en (nb_samples, timesteps, n_tech_features) avec n_tech_features = 1 si pas d'autres features
+    X_tech = X_tech.reshape(X_tech.shape[0], 30, tech_features)
+
+    # Extraire les variables fondamentales
+    X_fund = df[fund_features].values  # (nb_samples, n_fund_features)
+
+    # Reshape la sortie `y` pour qu'elle soit en (nb_samples, 3, 1)
+    y = y.reshape(y.shape[0], 3, 1)
+
+    return X_tech, X_fund, y
+
+
+def split_data_by_year(df, train_years, val_years, test_years):
+    """
+    Sépare les données en train, validation et test en fonction des années.
+
+    :param df: DataFrame avec une colonne 'year'
+    :param train_years: Liste des années pour l'entraînement
+    :param val_years: Liste des années pour la validation
+    :param test_years: Liste des années pour le test
+    :return: (df_train, df_val, df_test)
+    """
+    df_train = df[df['year'].isin(train_years)]
+    df_val = df[df['year'].isin(val_years)]
+    df_test = df[df['year'].isin(test_years)]
+    
+    return df_train, df_val, df_test
+
 
 # ------------------------------ Model computing ----------------------------- #
 
@@ -104,20 +343,6 @@ def create_sequences(data, target_index, sequence_length, prediction_steps):
 
     return np.array(X), np.array(y)
 
-# def create_sequences(data, target_index, sequence_length, prediction_horizon):
-#     X, y = [], []
-    
-#     for i in range(len(data) - sequence_length - prediction_horizon):
-#         seq_X = data[i:i + sequence_length]  # Fenêtre d'entrée (ex: 2 ans)
-#         future_avg = np.mean(data[i + sequence_length : i + sequence_length + prediction_horizon, target_index])
-#         current_price = data[i + sequence_length - 1, target_index]
-#         seq_y = 1 if future_avg > current_price else 0  # Hausse ou baisse sur 1 an
-        
-#         X.append(seq_X)
-#         y.append(seq_y)
-
-#     return np.array(X), np.array(y)
-
 def calculate_accuracy(y_true, y_pred, tolerance=0.05):
     """
     Calcule l'accuracy pour un modèle de régression, en fonction d'un seuil de tolérance.
@@ -154,7 +379,6 @@ def get_performance_metrics(y_test, y_pred):
     mape = mean_absolute_percentage_error(y_test, y_pred) * 100
     smape_value = smape(y_test, y_pred)
 
-
     # Affichage des résultats dans une seule fenêtre
     print(f'----- Résultats des métriques -----')
     print(f'RMSE : {rmse}')
@@ -164,6 +388,31 @@ def get_performance_metrics(y_test, y_pred):
     print(f"Model Accuracy: {accuracy:.2f}%")
     print(f"MAPE: {mape:.2f}%")
     print(f"SMAPE : {smape_value:.2f}%")
+
+def get_performance_metrics_multiple_days(y_test, y_pred):
+    """
+    Calcule les métriques de performance pour chaque jour de prédiction.
+
+    :param y_test: Vérités terrain (shape: batch_size, 3, 1)
+    :param y_pred: Prédictions du modèle (shape: batch_size, 3)
+    :return: Dictionnaire contenant les métriques pour chaque horizon de prédiction
+    """
+    # Reshape y_test pour qu'il ait la même forme que y_pred
+    y_test = y_test.reshape(y_test.shape[0], y_test.shape[1])
+
+    metrics = {}
+    for day in range(y_test.shape[1]):  # Pour chaque jour de prédiction
+        metrics[f"Day {day+1}"] = {
+            "RMSE": np.sqrt(mean_squared_error(y_test[:, day], y_pred[:, day])),
+            "MAE": mean_absolute_error(y_test[:, day], y_pred[:, day]),
+            "R²": r2_score(y_test[:, day], y_pred[:, day]),
+            "NMAE": mean_absolute_error(y_test[:, day], y_pred[:, day]) / np.mean(np.abs(y_test[:, day])),
+            "Accuracy": calculate_accuracy(y_test[:, day], y_pred[:, day], tolerance=0.05),
+            "MAPE": mean_absolute_percentage_error(y_test[:, day], y_pred[:, day]) * 100,
+            "SMAPE": smape(y_test[:, day], y_pred[:, day])
+        }
+
+    return metrics
 
 # ------------------------------- Graph results ------------------------------ #
 
@@ -286,4 +535,33 @@ def plot_errors_hist(y_test, y_pred):
     plt.xlabel('Valeur')
     plt.ylabel('Fréquence')
     plt.legend()
+    plt.show()
+
+def plot_errors_hist_multiple_days(y_test, y_pred):
+    """
+    Affiche les histogrammes des erreurs pour chaque jour de prédiction (Day 1, Day 2, Day 3).
+
+    :param y_test: Vérités terrain (shape: batch_size, 3, 1)
+    :param y_pred: Prédictions du modèle (shape: batch_size, 3)
+    """
+    # Reshape y_test pour qu'il ait la même forme que y_pred
+    y_test = y_test.reshape(y_test.shape[0], y_test.shape[1])
+
+    # Calcul des erreurs (différences entre y_test et y_pred)
+    errors = y_test - y_pred  # y_test : valeurs réelles, y_pred : prédictions
+
+    # Configuration de la figure pour afficher 3 histogrammes
+    plt.figure(figsize=(15, 5))
+
+    # Pour chaque jour de prédiction, afficher l'histogramme des erreurs
+    for day in range(y_test.shape[1]):
+        plt.subplot(1, 3, day + 1)  # Crée une grille 1x3 pour 3 histogrammes
+        plt.hist(errors[:, day], bins=20, color='blue', edgecolor="black", alpha=0.7, label=f'Erreurs Day {day+1}')
+        plt.title(f'Histogramme des erreurs - Day {day+1}')
+        plt.xlabel('Erreur')
+        plt.ylabel('Fréquence')
+        plt.legend()
+
+    # Affichage des histogrammes
+    plt.tight_layout()
     plt.show()
