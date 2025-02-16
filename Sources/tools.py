@@ -65,7 +65,40 @@ def filter_date_df(df):
 
     return filtered_df
 
-def create_windows_dataframe(df):
+
+def add_technical_indicators(df):
+    # Create technical indicators
+    df['ATR'] = df.ta.atr(length=20)
+    df['RSI'] = df.ta.rsi()
+    df['Average'] = df.ta.midprice(length=1) #midprice
+    df['MA40'] = df.ta.sma(length=40)
+    df['MA80'] = df.ta.sma(length=80)
+    df['MA160'] = df.ta.sma(length=160)
+
+    df = df.dropna()
+
+    return df
+
+
+def scale_df(df, non_scale_var):
+    # Save variable names
+    var_names = df.columns.tolist()
+    for var in non_scale_var:
+        var_names.remove(var)
+
+    # Scaling
+    scaler = MinMaxScaler()
+    df_scaled = scaler.fit_transform(df.drop(columns=non_scale_var))
+
+    df_scaled = pd.DataFrame(df_scaled, columns=var_names)
+
+    # Reconstruct df with scaled values
+    df_new = pd.concat([df[non_scale_var].reset_index(drop=True), df_scaled], axis=1)
+
+    return df_new
+
+
+def create_windows_dataframe(df, technical_indicators):
     """
     Pour chaque action (colonne 'Name') et pour chaque année entre 2017 et 2021, 
     extrait et sauvegarde dans un DataFrame :
@@ -105,7 +138,7 @@ def create_windows_dataframe(df):
             if len(data_year) < 30:
                 continue
             # Fenêtre technique : les 30 derniers jours de l'année (en ordre chronologique)
-            tech_window = data_year.iloc[-30:]['Close'].tolist()
+            tech_window = data_year.iloc[-30:][technical_indicators].to_numpy()
             
             # Récupérer les données de l'année suivante pour constituer la cible
             next_year = yr + 1
@@ -210,7 +243,7 @@ def fill_missing_values(df):
     S'il reste des NaN, applique un forward fill (ffill) puis un backward fill (bfill).
     
     Paramètres :
-        df (pd.DataFrame) : DataFrame contenant les colonnes 'symbol', 'year' et les indicateurs financiers.
+        df (pd.DataFrame) : DataFrame contenant les colonnes 'Name', 'year' et les indicateurs financiers.
 
     Retourne :
         pd.DataFrame : DataFrame sans NaN.
@@ -218,7 +251,7 @@ def fill_missing_values(df):
     df_filled = df.copy()
 
     # Appliquer l'interpolation et les fills sur chaque action individuellement
-    df_filled = df_filled.groupby("symbol").apply(lambda group: group.interpolate(method='linear').ffill().bfill())
+    df_filled = df_filled.groupby("Name").apply(lambda group: group.interpolate(method='linear').ffill().bfill())
 
     # Réinitialiser l'index pour éviter une multi-indexation
     df_filled.reset_index(drop=True, inplace=True)
@@ -232,13 +265,13 @@ def fill_nan_with_yearly_mean(df):
     sur l'année correspondante.
 
     Paramètres :
-        df (pd.DataFrame) : DataFrame contenant les colonnes 'symbol', 'year' et les indicateurs financiers.
+        df (pd.DataFrame) : DataFrame contenant les colonnes 'Name', 'year' et les indicateurs financiers.
 
     Retourne :
         pd.DataFrame : DataFrame où les valeurs entièrement NaN pour une action sont remplacées par la moyenne de l'année correspondante.
     """
-    # Identifier les colonnes indicateurs (hors 'symbol' et 'year')
-    cols_to_fill = df.columns.difference(['symbol', 'year'])
+    # Identifier les colonnes indicateurs (hors 'Name' et 'year')
+    cols_to_fill = df.columns.difference(['Name', 'year'])
 
     # Calculer la moyenne de chaque variable pour chaque année
     yearly_means = df.groupby("year")[cols_to_fill].mean()
@@ -253,7 +286,7 @@ def fill_nan_with_yearly_mean(df):
         return group
 
     # Appliquer le remplissage à chaque action
-    df_filled = df.groupby("symbol", group_keys=False).apply(fill_action_nan)
+    df_filled = df.groupby("Name", group_keys=False).apply(fill_action_nan)
 
     return df_filled
 
